@@ -1,4 +1,4 @@
-from fastapi_shop.data import products
+from fastapi_shop.data.products import products  # Измененный импорт
 
 def get_next_id() -> int:
     """Генерирует следующий доступный ID для нового продукта"""
