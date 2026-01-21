@@ -32,3 +32,8 @@ class ProductCreate(BaseModel):
         description="Цена в кредитах",
         example=9.80
     )
+    category_id: int = Field(
+        gt=0,
+        description="ID категории, к которой принадлежит продукт",
+        example=1
+    )

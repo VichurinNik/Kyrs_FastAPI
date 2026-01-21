@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from core.config import settings
 from core.database import init_db
-from routes import products
+from routes import products, categories  # НОВЫЙ ИМПОРТ
 from utils.telegram import send_telegram_notification
 
 
@@ -30,6 +30,9 @@ app = FastAPI(
 
 # Подключаем роутер продуктов
 app.include_router(products.router, prefix="/products", tags=["products"])
+
+# Подключаем роутер категорий
+app.include_router(categories.router, tags=["categories"])  # НОВАЯ СТРОКА
 
 
 @app.get("/")

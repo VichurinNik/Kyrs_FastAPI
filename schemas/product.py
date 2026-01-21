@@ -1,4 +1,5 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+from schemas.category import CategoryRead
 
 
 class Product(BaseModel):
@@ -21,6 +22,6 @@ class Product(BaseModel):
         description="Цена в кредитах",
         example=9.80
     )
+    category: CategoryRead = Field(description="Категория продукта")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
