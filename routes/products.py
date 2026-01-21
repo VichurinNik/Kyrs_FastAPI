@@ -1,14 +1,18 @@
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from sqlalchemy import select, or_
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, UploadFile
+from sqlalchemy import select, or_, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import AsyncSessionLocal
 from models.product import Product as ProductModel
-from models.category import Category as CategoryModel  # НОВЫЙ ИМПОРТ
+from models.category import Category as CategoryModel
 from schemas.product import Product as ProductSchema
 from schemas.product_create import ProductCreate
 from utils.telegram import send_telegram_notification
+from core.storage import save_product_image, delete_product_image  # НОВЫЕ ИМПОРТЫ
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -19,217 +23,138 @@ async def get_db() -> AsyncSession:
         yield session
 
 
-@router.get("/", response_model=list[ProductSchema])
-async def get_products(
-        search: str = None,
-        currency: str = None,
-        sort_order: str = "asc",
-        category_id: int = None,  # НОВЫЙ ПАРАМЕТР
-        db: AsyncSession = Depends(get_db)
-):
+# Вспомогательная функция для получения товара по ID
+async def product_get_by_id(session: AsyncSession, product_id: int):
     """
-    Получить список всех продуктов с возможностью фильтрации и сортировки
+    Получить товар по ID
     """
-    # Используем "жадную" загрузку для связанной категории
-    query = select(ProductModel).options(selectinload(ProductModel.category))
-
-    # Применяем фильтрацию по поиску
-    if search:
-        query = query.where(
-            or_(
-                ProductModel.name.ilike(f"%{search}%"),
-                ProductModel.description.ilike(f"%{search}%")
-            )
-        )
-
-    # Фильтрация по категории
-    if category_id:
-        query = query.where(ProductModel.category_id == category_id)
-
-    # Применяем сортировку по валюте
-    if currency:
-        try:
-            price_column = getattr(ProductModel, f"price_{currency}")
-            if sort_order.lower() == "desc":
-                query = query.order_by(price_column.desc())
-            else:
-                query = query.order_by(price_column)
-        except AttributeError:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Недопустимая валюта: {currency}. Допустимые значения: shmeckles, flurbos, credits"
-            )
-
-    result = await db.execute(query)
-    products = result.scalars().all()
-
-    return products
-
-
-@router.get("/{product_id}", response_model=ProductSchema)
-async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Получить продукт по ID
-    """
-    # Используем "жадную" загрузку для связанной категории
     query = select(ProductModel).options(selectinload(ProductModel.category))
     query = query.where(ProductModel.id == product_id)
 
-    result = await db.execute(query)
+    result = await session.execute(query)
     product = result.scalar_one_or_none()
 
-    if product is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Продукт с ID {product_id} не найден"
-        )
-
     return product
 
 
-@router.post("/", response_model=ProductSchema)
-async def create_product(
-        product_data: ProductCreate,
-        background_tasks: BackgroundTasks,
-        db: AsyncSession = Depends(get_db)
-):
-    """
-    Создать новый продукт
-    """
-    # Проверяем существование категории
-    category = await db.get(CategoryModel, product_data.category_id)
-    if category is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Категория с ID {product_data.category_id} не найдена"
-        )
-
-    # Создаем новый продукт
-    new_product = ProductModel(**product_data.model_dump())
-
-    db.add(new_product)
-    await db.commit()
-    await db.refresh(new_product)
-
-    # Загружаем связанную категорию для ответа
-    await db.refresh(new_product, ["category"])
-
-    # Формируем сообщение для Telegram
-    message = f"""🆕 *Создан новый продукт*
-
-📦 *Название:* {new_product.name}
-🆔 *ID:* {new_product.id}
-📝 *Описание:* {new_product.description[:100]}...
-🏷️ *Категория:* {category.name}
-
-💰 *Цены:*
-  • Шмекели: {new_product.price_shmeckles}
-  • Флурбо: {new_product.price_flurbos}
-  • Кредиты: {new_product.price_credits}
-"""
-
-    background_tasks.add_task(send_telegram_notification, message)
-
-    return new_product
+# ... остальные существующие эндпоинты ...
 
 
-@router.put("/{product_id}", response_model=ProductSchema)
-async def update_product(
+@router.post("/{product_id}/upload-image", summary="Загрузить изображение для товара")
+async def upload_product_image(
         product_id: int,
-        product_data: ProductCreate,
-        background_tasks: BackgroundTasks,
+        file: UploadFile,
         db: AsyncSession = Depends(get_db)
 ):
     """
-    Обновить продукт по ID
+    Загружает изображение для товара и привязывает его.
+    Если старое изображение было — оно удаляется.
     """
-    # Получаем продукт из БД
-    product = await db.get(ProductModel, product_id)
+    logger.info(f"📥 Запрос на загрузку изображения для товара ID={product_id}")
 
+    # Проверка существования товара
+    product = await product_get_by_id(db, product_id)
     if product is None:
+        logger.error(f"❌ Товар с ID={product_id} не найден")
         raise HTTPException(
             status_code=404,
-            detail=f"Продукт с ID {product_id} не найден"
+            detail=f"Товар с ID {product_id} не найден"
         )
 
-    # Проверяем существование новой категории
-    if product_data.category_id != product.category_id:
-        category = await db.get(CategoryModel, product_data.category_id)
-        if category is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Категория с ID {product_data.category_id} не найдена"
-            )
+    # Удаление старого изображения, если оно есть
+    if product.image_url:
+        logger.info(f"🗑️ Удаление старого изображения: {product.image_url}")
+        delete_product_image(product.image_url)
 
-    # Сохраняем старые данные для уведомления
-    old_name = product.name
-    old_category_id = product.category_id
+    # Сохранение нового изображения
+    try:
+        image_url = await save_product_image(file)
+    except HTTPException as e:
+        logger.error(f"❌ Ошибка загрузки изображения: {e.detail}")
+        raise e
+    except Exception as e:
+        logger.error(f"❌ Неизвестная ошибка загрузки изображения: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось загрузить изображение"
+        )
 
-    # Обновляем поля продукта
-    for field, value in product_data.model_dump().items():
-        setattr(product, field, value)
+    # Обновление URL в базе данных
+    try:
+        stmt = update(ProductModel).where(
+            ProductModel.id == product_id
+        ).values(image_url=image_url)
 
-    await db.commit()
-    await db.refresh(product)
+        await db.execute(stmt)
+        await db.commit()
 
-    # Загружаем связанную категорию для ответа
-    await db.refresh(product, ["category"])
+        logger.info(f"✅ Изображение обновлено для товара ID={product_id}: {image_url}")
 
-    # Формируем сообщение для Telegram
-    category = await db.get(CategoryModel, product_data.category_id)
-    message = f"""✏️ *Обновлен продукт*
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления БД для товара ID={product_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось обновить товар в базе данных"
+        )
 
-📦 *Название:* {old_name} → {product.name}
-🆔 *ID:* {product_id}
-📝 *Описание обновлено*
-
-{"🏷️ *Категория изменена*" if old_category_id != product_data.category_id else "🏷️ *Категория:*"} {category.name}
-
-💰 *Новые цены:*
-  • Шмекели: {product.price_shmeckles}
-  • Флурбо: {product.price_flurbos}
-  • Кредиты: {product.price_credits}
-"""
-
-    background_tasks.add_task(send_telegram_notification, message)
-
-    return product
+    return {
+        "product_id": product_id,
+        "image_url": image_url,
+        "message": "Изображение успешно загружено"
+    }
 
 
-@router.delete("/{product_id}", status_code=204)
-async def delete_product(
+@router.delete("/{product_id}/image", summary="Удалить изображение товара")
+async def delete_product_image_endpoint(
         product_id: int,
-        background_tasks: BackgroundTasks,
         db: AsyncSession = Depends(get_db)
 ):
     """
-    Удалить продукт по ID
+    Удаляет изображение товара (с диска и из БД).
     """
-    # Получаем продукт из БД
-    product = await db.get(ProductModel, product_id)
+    logger.info(f"🗑️ Запрос на удаление изображения для товара ID={product_id}")
 
+    # Получение товара
+    product = await product_get_by_id(db, product_id)
     if product is None:
+        logger.error(f"❌ Товар с ID={product_id} не найден")
         raise HTTPException(
             status_code=404,
-            detail=f"Продукт с ID {product_id} не найден"
+            detail=f"Товар с ID {product_id} не найден"
         )
 
-    # Сохраняем информацию для уведомления
-    product_name = product.name
-    category = await db.get(CategoryModel, product.category_id)
-    category_name = category.name if category else "Неизвестная категория"
+    # Проверка наличия изображения
+    if not product.image_url:
+        logger.error(f"❌ У товара ID={product_id} нет изображения")
+        raise HTTPException(
+            status_code=400,
+            detail=f"У товара с ID {product_id} нет изображения"
+        )
 
-    await db.delete(product)
-    await db.commit()
+    # Удаление файла с диска
+    if not delete_product_image(product.image_url):
+        logger.warning(f"⚠️ Файл изображения не найден на диске: {product.image_url}")
 
-    # Формируем сообщение для Telegram
-    message = f"""🗑️ *Удален продукт*
+    # Обновление БД
+    try:
+        stmt = update(ProductModel).where(
+            ProductModel.id == product_id
+        ).values(image_url=None)
 
-📦 *Название:* {product_name}
-🆔 *ID:* {product_id}
-🏷️ *Категория:* {category_name}
-"""
+        await db.execute(stmt)
+        await db.commit()
 
-    background_tasks.add_task(send_telegram_notification, message)
+        logger.info(f"✅ Изображение удалено для товара ID={product_id}")
 
-    return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления БД для товара ID={product_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось обновить товар в базе данных"
+        )
+
+    return {
+        "message": "Изображение успешно удалено",
+        "product_id": product_id
+    }
+

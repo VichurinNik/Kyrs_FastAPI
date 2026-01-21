@@ -1,9 +1,14 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles  # НОВЫЙ ИМПОРТ
 from core.config import settings
 from core.database import init_db
-from routes import products, categories  # НОВЫЙ ИМПОРТ
+from routes import products, categories
 from utils.telegram import send_telegram_notification
+import logging
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -13,12 +18,12 @@ async def lifespan(app: FastAPI):
     """
     # Код, который выполняется при запуске приложения
     await init_db()
-    print("База данных инициализирована")
+    logger.info("✅ База данных инициализирована")
 
     yield  # Здесь приложение работает
 
     # Код, который выполняется при остановке приложения
-    print("Приложение остановлено")
+    logger.info("⏹️ Приложение остановлено")
 
 
 app = FastAPI(
@@ -32,7 +37,11 @@ app = FastAPI(
 app.include_router(products.router, prefix="/products", tags=["products"])
 
 # Подключаем роутер категорий
-app.include_router(categories.router, tags=["categories"])  # НОВАЯ СТРОКА
+app.include_router(categories.router, tags=["categories"])
+
+# Подключаем раздачу статических файлов
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+logger.info("✅ Статические файлы (uploads) подключены")
 
 
 @app.get("/")
