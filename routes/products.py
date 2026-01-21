@@ -1,64 +1,69 @@
-from fastapi import APIRouter, HTTPException, Path, Query
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy import select, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from schemas.product import Product
+from core.database import AsyncSessionLocal
+from models.product import Product as ProductModel
+from schemas.product import Product as ProductSchema
 from schemas.product_create import ProductCreate
-from data.products import products
-from utils.helpers import get_next_id
+from utils.telegram import send_telegram_notification
 
-# Создаем роутер с префиксом и тегом
-router = APIRouter(
-    prefix="/products",
-    tags=["Products"]
-)
+router = APIRouter()
 
 
-@router.get(
-    "/",
-    response_model=List[Product],
-    status_code=200,
-    summary="Получить все продукты с фильтрацией и сортировкой"
-)
-async def get_all_products(
-        search: Optional[str] = Query(None, description="Поиск по названию или описанию"),
-        currency: Optional[str] = Query(None, description="Валюта для сортировки (shmeckles, credits, flurbos)"),
-        sort_order: Optional[str] = Query(None, description="Направление сортировки (asc, desc)")
+# Зависимость для получения сессии БД
+async def get_db() -> AsyncSession:
+    async with AsyncSessionLocal() as session:
+        yield session
+
+
+@router.get("/", response_model=list[ProductSchema])
+async def get_products(
+        search: str = None,
+        currency: str = None,
+        sort_order: str = "asc",
+        db: AsyncSession = Depends(get_db)
 ):
     """
-    Получить список всех товаров с возможностью поиска и сортировки.
+    Получить список всех продуктов с возможностью фильтрации и сортировки
     """
-    filtered_products = products.copy()
+    query = select(ProductModel)
 
+    # Применяем фильтрацию по поиску
     if search:
-        search_lower = search.lower()
-        filtered_products = [
-            product for product in filtered_products
-            if search_lower in product["name"].lower() or search_lower in product["description"].lower()
-        ]
+        query = query.where(
+            or_(
+                ProductModel.name.ilike(f"%{search}%"),
+                ProductModel.description.ilike(f"%{search}%")
+            )
+        )
 
-    if currency and sort_order:
-        def get_price(product):
-            return product["prices"].get(currency, float('inf'))
+    # Применяем сортировку по валюте
+    if currency:
+        try:
+            price_column = getattr(ProductModel, f"price_{currency}")
+            if sort_order.lower() == "desc":
+                query = query.order_by(price_column.desc())
+            else:
+                query = query.order_by(price_column)
+        except AttributeError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Недопустимая валюта: {currency}. Допустимые значения: shmeckles, flurbos, credits"
+            )
 
-        reverse = sort_order.lower() == "desc"
-        filtered_products.sort(key=get_price, reverse=reverse)
+    result = await db.execute(query)
+    products = result.scalars().all()
 
-    return filtered_products
+    return products
 
 
-@router.get(
-    "/{product_id}",
-    response_model=Product,
-    status_code=200,
-    summary="Получить продукт по ID"
-)
-async def get_product(
-        product_id: int = Path(..., ge=1, description="ID продукта")
-):
+@router.get("/{product_id}", response_model=ProductSchema)
+async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Получить информацию о конкретном продукте по его ID.
+    Получить продукт по ID
     """
-    product = next((p for p in products if p["id"] == product_id), None)
+    product = await db.get(ProductModel, product_id)
 
     if product is None:
         raise HTTPException(
@@ -69,72 +74,112 @@ async def get_product(
     return product
 
 
-@router.post(
-    "/",
-    response_model=Product,
-    status_code=201,
-    summary="Создать новый продукт"
-)
-async def create_product(product_data: ProductCreate):
+@router.post("/", response_model=ProductSchema)
+async def create_product(
+        product_data: ProductCreate,
+        db: AsyncSession = Depends(get_db)
+):
     """
-    Создать новый продукт в магазине.
+    Создать новый продукт
     """
-    new_id = get_next_id()
-    new_product = {
-        "id": new_id,
-        **product_data.model_dump()
-    }
-    products.append(new_product)
+    # Создаем новый продукт из данных
+    new_product = ProductModel(**product_data.model_dump())
+
+    # Добавляем в сессию и сохраняем в БД
+    db.add(new_product)
+    await db.commit()
+    await db.refresh(new_product)
+
+    # Формируем сообщение для Telegram
+    message = f"""🆕 *Создан новый продукт*
+
+📦 *Название:* {new_product.name}
+🆔 *ID:* {new_product.id}
+📝 *Описание:* {new_product.description[:100]}...
+
+💰 *Цены:*
+  • Шмекели: {new_product.price_shmeckles}
+  • Флурбо: {new_product.price_flurbos}
+  • Кредиты: {new_product.price_credits}
+"""
+
+    # Отправляем уведомление в фоновом режиме
+    await send_telegram_notification(message)
+
     return new_product
 
 
-@router.put(
-    "/{product_id}",
-    response_model=Product,
-    status_code=200,
-    summary="Обновить продукт"
-)
+@router.put("/{product_id}", response_model=ProductSchema)
 async def update_product(
-        product_id: int = Path(..., ge=1, description="ID продукта"),
-        product_data: ProductCreate = ...
+        product_id: int,
+        product_data: ProductCreate,
+        db: AsyncSession = Depends(get_db)
 ):
     """
-    Полностью обновить информацию о продукте.
+    Обновить продукт по ID
     """
-    product_index = next((i for i, p in enumerate(products) if p["id"] == product_id), None)
+    # Получаем продукт из БД
+    product = await db.get(ProductModel, product_id)
 
-    if product_index is None:
+    if product is None:
         raise HTTPException(
             status_code=404,
             detail=f"Продукт с ID {product_id} не найден"
         )
 
-    updated_product = {
-        "id": product_id,
-        **product_data.model_dump()
-    }
-    products[product_index] = updated_product
+    # Обновляем поля продукта
+    for field, value in product_data.model_dump().items():
+        setattr(product, field, value)
 
-    return updated_product
+    # Сохраняем изменения
+    await db.commit()
+    await db.refresh(product)
+
+    # Формируем сообщение для Telegram
+    message = f"""✏️ *Обновлен продукт*
+
+📦 *Название:* {product.name}
+🆔 *ID:* {product.id}
+📝 *Описание:* {product.description[:100]}...
+
+💰 *Новые цены:*
+  • Шмекели: {product.price_shmeckles}
+  • Флурбо: {product.price_flurbos}
+  • Кредиты: {product.price_credits}
+"""
+
+    # Отправляем уведомление в фоновом режиме
+    await send_telegram_notification(message)
+
+    return product
 
 
-@router.delete(
-    "/{product_id}",
-    status_code=204,
-    summary="Удалить продукт"
-)
-async def delete_product(
-        product_id: int = Path(..., ge=1, description="ID продукта")
-):
+@router.delete("/{product_id}", status_code=204)
+async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """
-    Удалить продукт из магазина.
+    Удалить продукт по ID
     """
-    product_index = next((i for i, p in enumerate(products) if p["id"] == product_id), None)
+    # Получаем продукт из БД
+    product = await db.get(ProductModel, product_id)
 
-    if product_index is None:
+    if product is None:
         raise HTTPException(
             status_code=404,
             detail=f"Продукт с ID {product_id} не найден"
         )
 
-    products.pop(product_index)
+    # Удаляем продукт
+    await db.delete(product)
+    await db.commit()
+
+    # Формируем сообщение для Telegram
+    message = f"""🗑️ *Удален продукт*
+
+📦 *Название:* {product.name}
+🆔 *ID:* {product.id}
+"""
+
+    # Отправляем уведомление в фоновом режиме
+    await send_telegram_notification(message)
+
+    return None

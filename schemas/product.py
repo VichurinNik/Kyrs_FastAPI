@@ -1,13 +1,26 @@
-from pydantic import BaseModel
-from pydantic import Field
-from typing import Dict
+from pydantic import BaseModel, Field
+
 
 class Product(BaseModel):
-    id: int = Field(description="Product ID")
-    name: str = Field(description="Product Name", examples = ["Стандартный Плюмбус", "Коробка с Мисиксами"])
-    description: str = Field(description="Product Description", examples=[
-            "Каждый дом должен иметь плюмбус. Мы не знаем, что он делает, но он делает это очень хорошо.",
-            "Нужна помощь по дому? Нажмите кнопку, и появится Мисикс, готовый выполнить одно ваше поручение."
-        ])
-    prices: Dict[str,float] = Field(description="Product Price", examples=[{"shmeckles": 6.5, "credits": 4.8, "flurbos": 3.2}])
-    image_url: str = Field(description="Путь к изображению товара",examples=["/images/plumbus.webp", "/images/meeseeks-box.webp"])
+    id: int = Field(description="Уникальный идентификатор продукта")
+    name: str = Field(max_length=100, description="Название продукта")
+    description: str = Field(max_length=500, description="Описание продукта")
+    image_url: str = Field(max_length=200, description="URL изображения продукта")
+    price_shmeckles: float = Field(
+        gt=0,
+        description="Цена в шмекелях",
+        example=19.99
+    )
+    price_flurbos: float = Field(
+        gt=0,
+        description="Цена в флурбо",
+        example=14.50
+    )
+    price_credits: float = Field(
+        gt=0,
+        description="Цена в кредитах",
+        example=9.80
+    )
+
+    class Config:
+        from_attributes = True

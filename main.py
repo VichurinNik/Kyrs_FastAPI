@@ -1,46 +1,50 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from config import settings
+from core.config import settings
+from core.database import init_db
+from routes import products
+from utils.telegram import send_telegram_notification
 
-# Импортируем роутеры
-from routes.products import router as products_router
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Контекстный менеджер для управления жизненным циклом приложения
+    """
+    # Код, который выполняется при запуске приложения
+    await init_db()
+    print("База данных инициализирована")
+
+    yield  # Здесь приложение работает
+
+    # Код, который выполняется при остановке приложения
+    print("Приложение остановлено")
+
 
 app = FastAPI(
-    title="Ваше ФИО — Домашнее задание №33",
-    description="Рефакторинг FastAPI проекта: модульная структура с APIRouter и конфигурацией",
-    version="1.0.0"
+    title="FastAPI Shop",
+    description="Магазин товаров из мультсериала Rick and Morty",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# Подключаем роутеры
-app.include_router(products_router)
+# Подключаем роутер продуктов
+app.include_router(products.router, prefix="/products", tags=["products"])
 
 
 @app.get("/")
 async def root():
-    """Корневой эндпоинт с информацией о приложении"""
-    # Маскируем ключ для безопасности
-    masked_key = settings.tg_bot_key[:10] + "..." if settings.tg_bot_key else "не установлен"
-
     return {
-        "message": "Добро пожаловать в API магазина Рика и Морти!",
-        "version": "1.0.0",
-        "features": [
-            "Полный CRUD для продуктов",
-            "Поиск и фильтрация",
-            "Модульная архитектура с APIRouter"
-        ],
-        "telegram_bot_key": masked_key,
-        "documentation": "/docs",
-        "health_check": "/health"
+        "message": "Добро пожаловать в FastAPI Shop!",
+        "docs": "http://127.0.0.1:8000/docs",
+        "version": "1.0.0"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Эндпоинт для проверки здоровья приложения"""
-    return {"status": "healthy", "message": "API работает корректно"}
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    try:
+        await send_telegram_notification("🟢 Сервер запущен и работает")
+        return {"status": "healthy", "message": "Сервер работает, уведомление отправлено"}
+    except Exception as e:
+        return {"status": "healthy", "message": f"Сервер работает, но уведомление не отправлено: {str(e)}"}
