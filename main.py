@@ -1,30 +1,5 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles  # НОВЫЙ ИМПОРТ
-from core.config import settings
-from core.database import init_db
-from routes import products, categories
-from utils.telegram import send_telegram_notification
-import logging
-
-# Настройка логирования
-logger = logging.getLogger(__name__)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Контекстный менеджер для управления жизненным циклом приложения
-    """
-    # Код, который выполняется при запуске приложения
-    await init_db()
-    logger.info("✅ База данных инициализирована")
-
-    yield  # Здесь приложение работает
-
-    # Код, который выполняется при остановке приложения
-    logger.info("⏹️ Приложение остановлено")
-
+# ... существующие импорты ...
+from routes import cart, orders
 
 app = FastAPI(
     title="FastAPI Shop",
@@ -33,30 +8,17 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Подключаем роутер продуктов
-app.include_router(products.router, prefix="/products", tags=["products"])
+# ... существующие роутеры ...
 
-# Подключаем роутер категорий
-app.include_router(categories.router, tags=["categories"])
+# Подключаем роутеры корзины и заказов
+app.include_router(
+    cart.router,
+    prefix="/cart",
+    tags=["Корзина"]
+)
 
-# Подключаем раздачу статических файлов
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-logger.info("✅ Статические файлы (uploads) подключены")
-
-
-@app.get("/")
-async def root():
-    return {
-        "message": "Добро пожаловать в FastAPI Shop!",
-        "docs": "http://127.0.0.1:8000/docs",
-        "version": "1.0.0"
-    }
-
-
-@app.get("/health")
-async def health_check():
-    try:
-        await send_telegram_notification("🟢 Сервер запущен и работает")
-        return {"status": "healthy", "message": "Сервер работает, уведомление отправлено"}
-    except Exception as e:
-        return {"status": "healthy", "message": f"Сервер работает, но уведомление не отправлено: {str(e)}"}
+app.include_router(
+    orders.router,
+    prefix="/orders",
+    tags=["Заказы"]
+)
